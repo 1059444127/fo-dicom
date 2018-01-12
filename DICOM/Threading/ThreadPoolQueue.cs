@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 
 namespace Dicom.Threading {
@@ -23,6 +24,7 @@ namespace Dicom.Threading {
 		}
 
 		private object _lock = new object();
+		private volatile bool _stopped = false;
 		private Dictionary<T, WorkGroup> _groups;
 
 		public ThreadPoolQueue() {
@@ -37,10 +39,25 @@ namespace Dicom.Threading {
 			set;
 		}
 
+		public bool IsRunning {
+			get { return !_stopped; }
+		}
+
 		/// <summary>Value of key for default group.</summary>
 		public T DefaultGroup {
 			get;
 			set;
+		}
+
+		public void Start() {
+			_stopped = false;
+
+			foreach (var group in _groups.Keys.ToArray())
+				Execute(group);
+		}
+
+		public void Stop() {
+			_stopped = true;
 		}
 
 		public void Queue(Action action) {
@@ -103,18 +120,21 @@ namespace Dicom.Threading {
 		}
 
 		private void Execute(T groupKey) {
+			if (_stopped)
+				return;
+
 			WorkGroup group = null;
 			lock (_lock) {
 				if (!_groups.TryGetValue(groupKey, out group))
 					return;
 			}
-
 			lock (group.Lock) {
 				if (group.Executing)
 					return;
 
 				if (group.Items.Count == 0 && !group.Key.Equals(DefaultGroup)) {
 					_groups.Remove(groupKey);
+                    System.Console.WriteLine("Remove WorkGroup Key is {0}", group.Key);
 					return;
 				}
 
@@ -128,6 +148,9 @@ namespace Dicom.Threading {
 			var group = (WorkGroup)state;
 
 			do {
+				if (_stopped)
+					return;
+
 				WorkItem item = null;
 
 				bool empty;
@@ -136,13 +159,14 @@ namespace Dicom.Threading {
 
 					if (!empty)
 						item = group.Items.Dequeue();
+                    System.Console.WriteLine("WorkGroup Key is {0}", group.Key);
 				}
 
 				if (empty) {
 					var linger = DateTime.Now.AddMilliseconds(Linger);
 					while (empty && DateTime.Now < linger) {
 						Thread.Sleep(0);
-						lock (_lock) {
+						lock (group.Lock) {
 							empty = group.Items.Count == 0;
 
 							if (!empty)
@@ -151,14 +175,18 @@ namespace Dicom.Threading {
 					}
 
 					if (empty) {
-						lock (_lock) {
-							lock (group.Lock)
-								group.Executing = false;
+						lock (group.Lock) {
+							group.Executing = false;
 
-							if (!group.Key.Equals(DefaultGroup))
-								_groups.Remove(group.Key);
+							lock (_lock) {
+                                if (!group.Key.Equals(DefaultGroup))
+                                {
+                                    _groups.Remove(group.Key);
+                                    System.Console.WriteLine("Remove WorkGroup Key is {0}", group.Key);
+                                }
 
-							return;
+								return;
+							}
 						}
 					}
 				}

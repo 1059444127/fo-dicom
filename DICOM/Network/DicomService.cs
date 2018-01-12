@@ -8,13 +8,11 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
-using NLog;
-
-using Dicom.Log;
 using Dicom.Imaging.Codec;
 using Dicom.IO;
 using Dicom.IO.Reader;
 using Dicom.IO.Writer;
+using Dicom.Log;
 using Dicom.Threading;
 
 namespace Dicom.Network {
@@ -28,6 +26,7 @@ namespace Dicom.Network {
 		private List<DicomRequest> _pending;
 		private DicomMessage _dimse;
 		private Stream _dimseStream;
+	    private bool _isTempFile;
 		private int _readLength;
 		private bool _isConnected;
 		private ThreadPoolQueue<int> _processQueue;
@@ -43,7 +42,7 @@ namespace Dicom.Network {
 			_processQueue = new ThreadPoolQueue<int>();
 			_processQueue.DefaultGroup = Int32.MinValue;
 			_isConnected = true;
-			Logger = log ?? LogManager.GetLogger("Dicom.Network");
+			Logger = log ?? LogManager.Default.GetLogger("Dicom.Network");
 			BeginReadPDUHeader();
 			Options = DicomServiceOptions.Default;
 		}
@@ -95,8 +94,22 @@ namespace Dicom.Network {
 		}
 
 		private void CloseConnection(int errorCode) {
+			if (!_isConnected)
+				return;
+
 			_isConnected = false;
 			try { _network.Close(); } catch { }
+
+            if (errorCode > 0)
+                Logger.Error("Connection closed with error: {0}", errorCode);
+            else
+            {
+                Logger.Error("Connection closed");
+                //zssure:2015-04-14,try to conform whether AddRequest and Send uses the same one client
+                LogManager.Default.GetLogger("Dicom.Network").Info("zssure debug at DicomService CloseConnection 20150414,the DicomService object is {0}", this.GetHashCode());
+                //zssure:2015-04-14,end
+
+            }
 
 			if (this is IDicomServiceProvider)
 				(this as IDicomServiceProvider).OnConnectionClosed(errorCode);
@@ -112,6 +125,9 @@ namespace Dicom.Network {
 				_network.BeginRead(buffer, 0, 6, EndReadPDUHeader, buffer);
 			} catch (ObjectDisposedException) {
 				// silently ignore
+				CloseConnection(0);
+			} catch (NullReferenceException) {
+				// connection already closed; silently ignore
 				CloseConnection(0);
 			} catch (IOException e) {
 				int error = 0;
@@ -154,6 +170,9 @@ namespace Dicom.Network {
 			} catch (ObjectDisposedException) {
 				// silently ignore
 				CloseConnection(0);
+			} catch (NullReferenceException) {
+				// connection already closed; silently ignore
+				CloseConnection(0);
 			} catch (IOException e) {
 				int error = 0;
 				if (e.InnerException is SocketException) {
@@ -164,7 +183,7 @@ namespace Dicom.Network {
 
 				CloseConnection(error);
 			} catch (Exception e) {
-				Logger.Log(LogLevel.Error, "Exception processing PDU header: {0}", e.ToString());
+				Logger.Error("Exception processing PDU header: {0}", e.ToString());
 			}
 		}
 
@@ -194,7 +213,9 @@ namespace Dicom.Network {
 						var pdu = new AAssociateRQ(Association);
 						pdu.Read(raw);
 						LogID = Association.CallingAE;
-						Logger.Log(LogLevel.Info, "{0} <- Association request:\n{1}", LogID, Association.ToString());
+						if (Options.UseRemoteAEForLogName)
+							Logger = LogManager.Default.GetLogger(LogID);
+						Logger.Info("{0} <- Association request:\n{1}", LogID, Association.ToString());
 						if (this is IDicomServiceProvider)
 							(this as IDicomServiceProvider).OnReceiveAssociationRequest(Association);
 						break;
@@ -203,7 +224,7 @@ namespace Dicom.Network {
 						var pdu = new AAssociateAC(Association);
 						pdu.Read(raw);
 						LogID = Association.CalledAE;
-						Logger.Log(LogLevel.Info, "{0} <- Association accept:\n{1}", LogID, Association.ToString());
+						Logger.Info("{0} <- Association accept:\n{1}", LogID, Association.ToString());
 						if (this is IDicomServiceUser)
 							(this as IDicomServiceUser).OnReceiveAssociationAccept(Association);
 						break;
@@ -211,7 +232,7 @@ namespace Dicom.Network {
 				case 0x03: {
 						var pdu = new AAssociateRJ();
 						pdu.Read(raw);
-						Logger.Log(LogLevel.Info, "{0} <- Association reject [result: {1}; source: {2}; reason: {3}]", LogID, pdu.Result, pdu.Source, pdu.Reason);
+						Logger.Info("{0} <- Association reject [result: {1}; source: {2}; reason: {3}]", LogID, pdu.Result, pdu.Source, pdu.Reason);
 						if (this is IDicomServiceUser)
 							(this as IDicomServiceUser).OnReceiveAssociationReject(pdu.Result, pdu.Source, pdu.Reason);
 						break;
@@ -227,7 +248,7 @@ namespace Dicom.Network {
 				case 0x05: {
 						var pdu = new AReleaseRQ();
 						pdu.Read(raw);
-						Logger.Log(LogLevel.Info, "{0} <- Association release request", LogID);
+						Logger.Info("{0} <- Association release request", LogID);
 						if (this is IDicomServiceProvider)
 							(this as IDicomServiceProvider).OnReceiveAssociationReleaseRequest();
 						break;
@@ -235,7 +256,7 @@ namespace Dicom.Network {
 				case 0x06: {
 						var pdu = new AReleaseRP();
 						pdu.Read(raw);
-						Logger.Log(LogLevel.Info, "{0} <- Association release response", LogID);
+						Logger.Info("{0} <- Association release response", LogID);
 						if (this is IDicomServiceUser)
 							(this as IDicomServiceUser).OnReceiveAssociationReleaseResponse();
 						CloseConnection(0);
@@ -244,7 +265,7 @@ namespace Dicom.Network {
 				case 0x07: {
 						var pdu = new AAbort();
 						pdu.Read(raw);
-						Logger.Log(LogLevel.Info, "{0} <- Abort: {1} - {2}", LogID, pdu.Source, pdu.Reason);
+						Logger.Info("{0} <- Abort: {1} - {2}", LogID, pdu.Source, pdu.Reason);
 						if (this is IDicomServiceProvider)
 							(this as IDicomServiceProvider).OnReceiveAbort(pdu.Source, pdu.Reason);
 						else if (this is IDicomServiceUser)
@@ -269,8 +290,11 @@ namespace Dicom.Network {
 					Logger.Error("IO exception while reading PDU: {0}", e.ToString());
 
 				CloseConnection(error);
+			} catch (NullReferenceException) {
+				// connection already closed; silently ignore
+				CloseConnection(0);
 			} catch (Exception e) {
-				Logger.Log(LogLevel.Error, "Exception processing PDU: {0}", e.ToString());
+				Logger.Error("Exception processing PDU: {0}", e.ToString());
 				CloseConnection(0);
 			}
 		}
@@ -286,26 +310,21 @@ namespace Dicom.Network {
 					} else {
 						// create stream for receiving dataset
 						if (_dimseStream == null) {
-							if (_dimse.Type == DicomCommandField.CStoreRequest) {
-								var pc = Association.PresentationContexts.FirstOrDefault(x => x.ID == pdv.PCID);
+						    if (_dimse.Type == DicomCommandField.CStoreRequest) {
+                                var pc = Association.PresentationContexts.FirstOrDefault(x => x.ID == pdv.PCID);
 
-								var file = new DicomFile();
-								file.FileMetaInfo.MediaStorageSOPClassUID = pc.AbstractSyntax;
-								file.FileMetaInfo.MediaStorageSOPInstanceUID = _dimse.Command.Get<DicomUID>(DicomTag.AffectedSOPInstanceUID);
-								file.FileMetaInfo.TransferSyntax = pc.AcceptedTransferSyntax;
-								file.FileMetaInfo.ImplementationClassUID = Association.RemoteImplemetationClassUID;
-								file.FileMetaInfo.ImplementationVersionName = Association.RemoteImplementationVersion;
-								file.FileMetaInfo.SourceApplicationEntityTitle = Association.CallingAE;
+                                var file = new DicomFile();
+                                file.FileMetaInfo.MediaStorageSOPClassUID = pc.AbstractSyntax;
+                                file.FileMetaInfo.MediaStorageSOPInstanceUID = _dimse.Command.Get<DicomUID>(DicomTag.AffectedSOPInstanceUID);
+                                file.FileMetaInfo.TransferSyntax = pc.AcceptedTransferSyntax;
+                                file.FileMetaInfo.ImplementationClassUID = Association.RemoteImplemetationClassUID;
+                                file.FileMetaInfo.ImplementationVersionName = Association.RemoteImplementationVersion;
+                                file.FileMetaInfo.SourceApplicationEntityTitle = Association.CallingAE;
 
-								var fileName = TemporaryFile.Create();
-
-								file.Save(fileName);
-
-								_dimseStream = File.OpenWrite(fileName);
-								_dimseStream.Seek(0, SeekOrigin.End);
-							} else {
-								_dimseStream = new MemoryStream();
-							}
+                                _dimseStream = CreateCStoreReceiveStream(file);
+                            } else {
+                                _dimseStream = new MemoryStream();
+						    }
 						}
 					}
 
@@ -313,17 +332,17 @@ namespace Dicom.Network {
 
 					if (pdv.IsLastFragment) {
 						if (pdv.IsCommand) {
-							_dimseStream.Seek(0, SeekOrigin.Begin);
+                            _dimseStream.Seek(0, SeekOrigin.Begin);
 
-							var command = new DicomDataset();
+                            var command = new DicomDataset();
 
-							var reader = new DicomReader();
-							reader.IsExplicitVR = false;
-							reader.Read(new StreamByteSource(_dimseStream), new DicomDatasetReaderObserver(command));
+                            var reader = new DicomReader();
+                            reader.IsExplicitVR = false;
+                            reader.Read(new StreamByteSource(_dimseStream), new DicomDatasetReaderObserver(command));
+                            
+                            _dimseStream = null;
 
-							_dimseStream = null;
-
-							var type = command.Get<DicomCommandField>(DicomTag.CommandField);
+						    var type = command.Get<DicomCommandField>(DicomTag.CommandField);
 							switch (type) {
 							case DicomCommandField.CStoreRequest:
 								_dimse = new DicomCStoreRequest(command);
@@ -394,51 +413,66 @@ namespace Dicom.Network {
 								if (DicomMessage.IsRequest(_dimse.Type))
 									ThreadPool.QueueUserWorkItem(PerformDimseCallback, _dimse);
 								else
+                                    //ThreadPool.QueueUserWorkItem(PerformDimseCallback, _dimse);
 									_processQueue.Queue((_dimse as DicomResponse).RequestMessageID, PerformDimseCallback, _dimse);
 								_dimse = null;
 								return;
 							}
 						} else {
-							if (_dimse.Type != DicomCommandField.CStoreRequest) {
-								_dimseStream.Seek(0, SeekOrigin.Begin);
+                            if (_dimse.Type != DicomCommandField.CStoreRequest) {
+                                _dimseStream.Seek(0, SeekOrigin.Begin);
 
-								var pc = Association.PresentationContexts.FirstOrDefault(x => x.ID == pdv.PCID);
+                                var pc = Association.PresentationContexts.FirstOrDefault(x => x.ID == pdv.PCID);
 
-								_dimse.Dataset = new DicomDataset();
-								_dimse.Dataset.InternalTransferSyntax = pc.AcceptedTransferSyntax;
+                                _dimse.Dataset = new DicomDataset();
+                                _dimse.Dataset.InternalTransferSyntax = pc.AcceptedTransferSyntax;
 
-								var source = new StreamByteSource(_dimseStream);
-								source.Endian = pc.AcceptedTransferSyntax.Endian;
+                                var source = new StreamByteSource(_dimseStream);
+                                source.Endian = pc.AcceptedTransferSyntax.Endian;
 
-								var reader = new DicomReader();
-								reader.IsExplicitVR = pc.AcceptedTransferSyntax.IsExplicitVR;
-								reader.Read(source, new DicomDatasetReaderObserver(_dimse.Dataset));
+                                var reader = new DicomReader();
+                                reader.IsExplicitVR = pc.AcceptedTransferSyntax.IsExplicitVR;
+                                reader.Read(source, new DicomDatasetReaderObserver(_dimse.Dataset));
 
-								_dimseStream = null;
-							} else {
-								var fileName = (_dimseStream as FileStream).Name;
-								_dimseStream.Close();
-								_dimseStream = null;
+                                _dimseStream = null;
+                            } else {
+                                var request = _dimse as DicomCStoreRequest;
 
-								var request = _dimse as DicomCStoreRequest;
+                                try
+                                {
+                                    var dicomFile = GetCStoreDicomFile();
+                                    _dimseStream = null;
+                                    _isTempFile = false;
 
-								try {
-									request.File = DicomFile.Open(fileName);
-								} catch (Exception e) {
-									// failed to parse received DICOM file; send error response instead of aborting connection
-									SendResponse(new DicomCStoreResponse(request, new DicomStatus(DicomStatus.ProcessingFailure, e.Message)));
-									Logger.Error("Error parsing C-Store dataset: " + e.ToString());
-									(this as IDicomCStoreProvider).OnCStoreRequestException(fileName, e);
-									return;
-								}
-
-								request.File.File.IsTempFile = true;
-								request.Dataset = request.File.Dataset;
-							}
+                                    // NOTE: dicomFile will be valid with the default implementation of CreateCStoreReceiveStream() and
+                                    // GetCStoreDicomFile(), but can be null if a child class overrides either method and changes behavior.
+                                    // See documentation on CreateCStoreReceiveStream() and GetCStoreDicomFile() for information about why
+                                    // this might be desired.
+                                    request.File = dicomFile;
+                                    if (request.File != null)
+                                    {
+                                        request.Dataset = request.File.Dataset;
+                                    }
+                                }
+                                catch (Exception e)
+                                {
+                                    var fileName = "";
+                                    if (_dimseStream is FileStream)
+                                    {
+                                        fileName = (_dimseStream as FileStream).Name;
+                                    }
+                                    // failed to parse received DICOM file; send error response instead of aborting connection
+                                    SendResponse(new DicomCStoreResponse(request, new DicomStatus(DicomStatus.ProcessingFailure, e.Message)));
+                                    Logger.Error("Error parsing C-Store dataset: " + e.ToString());
+                                    (this as IDicomCStoreProvider).OnCStoreRequestException(fileName, e);
+                                    return;
+                                }
+                            }
 
 							if (DicomMessage.IsRequest(_dimse.Type))
 								ThreadPool.QueueUserWorkItem(PerformDimseCallback, _dimse);
 							else
+                                //ThreadPool.QueueUserWorkItem(PerformDimseCallback, _dimse);
 								_processQueue.Queue((_dimse as DicomResponse).RequestMessageID, PerformDimseCallback, _dimse);
 							_dimse = null;
 						}
@@ -452,11 +486,63 @@ namespace Dicom.Network {
 			}
 		}
 
-		private void PerformDimseCallback(object state) {
+        /// <summary>
+        /// The purpose of this method is to return the Stream that a SopInstance received
+        /// via CStoreSCP will be written to.  This default implementation creates a temporary
+        /// file and returns a FileStream on top of it.  Child classes can override this to write
+        /// to another stream and avoid the I/O associated with the temporary file if so desired.
+        /// Beware that some SopInstances can be very large so using a MemoryStream() could cause
+        /// out of memory situations.
+        /// </summary>
+        /// <param name="file">A DicomFile with FileMetaInfo populated</param>
+        /// <returns>The stream to write the SopInstance to</returns>
+        protected virtual Stream CreateCStoreReceiveStream(DicomFile file)
+        {
+            var fileName = TemporaryFile.Create();
+
+            file.Save(fileName);
+
+            var dimseStream = File.Open(fileName, FileMode.Open, FileAccess.ReadWrite);
+            _isTempFile = true;
+            dimseStream.Seek(0, SeekOrigin.End);
+            return dimseStream;
+        }
+        
+        /// <summary>
+        /// The purpose of this method is to create a DicomFile for the SopInstance received via
+        /// CStoreSCP to pass to the IDicomCStoreProvider.OnCStoreRequest method for processing.
+        /// This default implementation will return a DicomFile if the stream created by
+        /// CreateCStoreReceiveStream() is seekable or null if it is not.  Child classes that 
+        /// override CreateCStoreReceiveStream may also want override this to return a DicomFile 
+        /// for unseekable streams or to do cleanup related to receiving that specific instance.  
+        /// </summary>
+        /// <returns>The DicomFile or null if the stream is not seekable</returns>
+        protected virtual DicomFile GetCStoreDicomFile()
+        {
+			if (_dimseStream is FileStream) {
+				var name = (_dimseStream as FileStream).Name;
+				_dimseStream.Close();
+				_dimseStream = null;
+
+				var file = DicomFile.Open(name);
+				file.File.IsTempFile = _isTempFile;
+				return file;
+			} else if (_dimseStream.CanSeek) {
+                _dimseStream.Seek(0, SeekOrigin.Begin);
+                var file = DicomFile.Open(_dimseStream);
+                return file;
+            }
+            else
+            {
+                return null;
+            }
+        }
+
+	    private void PerformDimseCallback(object state) {
 			var dimse = state as DicomMessage;
 
 			try {
-				Logger.Log(LogLevel.Info, "{0} <- {1}", LogID, dimse.ToString(Options.LogDimseDatasets));
+				Logger.Info("{0} <- {1}", LogID, dimse.ToString(Options.LogDimseDatasets));
 
 				if (!DicomMessage.IsRequest(dimse.Type)) {
 					var rsp = dimse as DicomResponse;
@@ -665,8 +751,30 @@ namespace Dicom.Network {
 				pc = Association.PresentationContexts.FirstOrDefault(x => x.Result == DicomPresentationContextResult.Accept && x.AbstractSyntax == msg.SOPClassUID);
 			}
 
-			if (pc == null)
-			throw new DicomNetworkException("No accepted presentation context found for abstract syntax: {0}", msg.SOPClassUID);
+			if (pc == null) {
+				_pending.Remove(msg as DicomRequest);
+
+				try {
+					if (msg is DicomCStoreRequest)
+						(msg as DicomCStoreRequest).PostResponse(this, new DicomCStoreResponse(msg as DicomCStoreRequest, DicomStatus.SOPClassNotSupported));
+					else if (msg is DicomCEchoRequest)
+						(msg as DicomCEchoRequest).PostResponse(this, new DicomCEchoResponse(msg as DicomCEchoRequest, DicomStatus.SOPClassNotSupported));
+					else if (msg is DicomCFindRequest)
+						(msg as DicomCFindRequest).PostResponse(this, new DicomCFindResponse(msg as DicomCFindRequest, DicomStatus.SOPClassNotSupported));
+					else if (msg is DicomCMoveRequest)
+						(msg as DicomCMoveRequest).PostResponse(this, new DicomCMoveResponse(msg as DicomCMoveRequest, DicomStatus.SOPClassNotSupported));
+
+					//TODO: add N services
+				} catch {
+				}
+
+				Logger.Error("No accepted presentation context found for abstract syntax: {0}", msg.SOPClassUID);
+				lock (_lock)
+					_sending = false;
+				SendNextMessage();
+				return;
+			}
+
 			var dimse = new Dimse();
 			dimse.Message = msg;
 			dimse.PresentationContext = pc;
@@ -686,7 +794,10 @@ namespace Dicom.Network {
 					msg.Dataset = msg.Dataset.ChangeTransferSyntax(dimse.PresentationContext.AcceptedTransferSyntax);
 			}
 
-			Logger.Log(LogLevel.Info, "{0} -> {1}", LogID, msg.ToString(Options.LogDimseDatasets));
+            //zssure:2015-04-14，try to confirm whether AddRequest and Send should be together.
+            Logger.Info("zssure 2015-04-14,the DicomService is {0},HashCode {1}", this.ToString(), this.GetHashCode());
+            //zssure:2015-04-14,end
+			Logger.Info("{0} -> {1}", LogID, msg.ToString(Options.LogDimseDatasets));
 
 			dimse.Stream = new PDataTFStream(this, pc.ID, Association.MaximumPDULength);
 
@@ -926,7 +1037,9 @@ namespace Dicom.Network {
 		#region Send Methods
 		protected void SendAssociationRequest(DicomAssociation association) {
 			LogID = association.CalledAE;
-			Logger.Log(LogLevel.Info, "{0} -> Association request:\n{1}", LogID, association.ToString());
+			if (Options.UseRemoteAEForLogName)
+				Logger = LogManager.Default.GetLogger(LogID);
+			Logger.Info("{0} -> Association request:\n{1}", LogID, association.ToString());
 			Association = association;
 			SendPDU(new AAssociateRQ(Association));
 		}
@@ -940,27 +1053,27 @@ namespace Dicom.Network {
 					pc.SetResult(DicomPresentationContextResult.RejectNoReason);
 			}
 
-			Logger.Log(LogLevel.Info, "{0} -> Association accept:\n{1}", LogID, association.ToString());
+			Logger.Info("{0} -> Association accept:\n{1}", LogID, association.ToString());
 			SendPDU(new AAssociateAC(Association));
 		}
 
 		protected void SendAssociationReject(DicomRejectResult result, DicomRejectSource source, DicomRejectReason reason) {
-			Logger.Log(LogLevel.Info, "{0} -> Association reject [result: {1}; source: {2}; reason: {3}]", LogID, result, source, reason);
+			Logger.Info("{0} -> Association reject [result: {1}; source: {2}; reason: {3}]", LogID, result, source, reason);
 			SendPDU(new AAssociateRJ(result, source, reason));
 		}
 
 		protected void SendAssociationReleaseRequest() {
-			Logger.Log(LogLevel.Info, "{0} -> Association release request", LogID);
+			Logger.Info("{0} -> Association release request", LogID);
 			SendPDU(new AReleaseRQ());
 		}
 
 		protected void SendAssociationReleaseResponse() {
-			Logger.Log(LogLevel.Info, "{0} -> Association release response", LogID);
+			Logger.Info("{0} -> Association release response", LogID);
 			SendPDU(new AReleaseRP());
 		}
 
 		protected void SendAbort(DicomAbortSource source, DicomAbortReason reason) {
-			Logger.Log(LogLevel.Info, "{0} -> Abort [source: {1}; reason: {2}]", LogID, source, reason);
+			Logger.Info("{0} -> Abort [source: {1}; reason: {2}]", LogID, source, reason);
 			SendPDU(new AAbort(source, reason));
 		}
 		#endregion

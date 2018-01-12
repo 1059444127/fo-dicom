@@ -8,7 +8,7 @@ using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 
-using NLog;
+using Dicom.Log;
 
 namespace Dicom.Network {
 	public class DicomServer<T> : IDisposable where T: DicomService, IDicomServiceProvider {
@@ -16,6 +16,7 @@ namespace Dicom.Network {
 		private TcpListener _listener;
 		private List<T> _clients;
 		private Timer _timer;
+		private bool _isDisposing;
 
 		public DicomServer(int port, string certificateName = null) {
 			_clients = new List<T>();
@@ -56,7 +57,15 @@ namespace Dicom.Network {
 
 		private void OnAcceptTcpClient(IAsyncResult result) {
 			try {
+				if (_isDisposing || _listener == null)
+					return;
+
 				var client = _listener.EndAcceptTcpClient(result);
+
+				if (Options != null)
+					client.NoDelay = Options.TcpNoDelay;
+				else
+					client.NoDelay = DicomServiceOptions.Default.TcpNoDelay;
 
 				Stream stream = client.GetStream();
 
@@ -75,10 +84,10 @@ namespace Dicom.Network {
 				_clients.Add(scp);
 			} catch (Exception e) {
 				if (Logger == null)
-					Logger = LogManager.GetLogger("Dicom.Network");
+					Logger = LogManager.Default.GetLogger("Dicom.Network");
 				Logger.Error("Exception accepting client: " + e.ToString());
 			} finally {
-				if (_listener != null)
+				if (!_isDisposing && _listener != null)
 					_listener.BeginAcceptTcpClient(OnAcceptTcpClient, null);
 			}
 		}
@@ -93,6 +102,7 @@ namespace Dicom.Network {
 		}
 
 		public void Dispose() {
+			_isDisposing = true;
 			_listener.Stop();
 			_listener = null;
 		}

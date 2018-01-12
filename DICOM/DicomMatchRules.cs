@@ -57,6 +57,9 @@ namespace Dicom {
 		}
 
 		public bool Match(DicomDataset dataset) {
+			if (_rules.Count == 0)
+				return true;
+
 			if (_operator == DicomMatchOperator.Or) {
 				foreach (var rule in _rules)
 					if (rule.Match(dataset))
@@ -184,11 +187,8 @@ namespace Dicom {
 
 		#region Public Methods
 		public bool Match(DicomDataset dataset) {
-			if (dataset.Contains(_tag)) {
-				var value = dataset.Get<string>(_tag, -1, String.Empty);
-				return _value == value;
-			}
-			return false;
+			var value = dataset.Get<string>(_tag, -1, String.Empty);
+			return _value == value;
 		}
 
 		public override string ToString() {
@@ -215,11 +215,8 @@ namespace Dicom {
 
 		#region Public Methods
 		public bool Match(DicomDataset dataset) {
-			if (dataset.Contains(_tag)) {
-				var value = dataset.Get<string>(_tag, -1, String.Empty);
-				return value.StartsWith(_value);
-			}
-			return false;
+			var value = dataset.Get<string>(_tag, -1, String.Empty);
+			return value.StartsWith(_value);
 		}
 
 		public override string ToString() {
@@ -246,11 +243,8 @@ namespace Dicom {
 
 		#region Public Methods
 		public bool Match(DicomDataset dataset) {
-			if (dataset.Contains(_tag)) {
-				var value = dataset.Get<string>(_tag, -1, String.Empty);
-				return value.EndsWith(_value);
-			}
-			return false;
+			var value = dataset.Get<string>(_tag, -1, String.Empty);
+			return value.EndsWith(_value);
 		}
 
 		public override string ToString() {
@@ -277,11 +271,8 @@ namespace Dicom {
 
 		#region Public Methods
 		public bool Match(DicomDataset dataset) {
-			if (dataset.Contains(_tag)) {
-				var value = dataset.Get<string>(_tag, -1, String.Empty);
-				return value.Contains(_value);
-			}
-			return false;
+			var value = dataset.Get<string>(_tag, -1, String.Empty);
+			return value.Contains(_value);
 		}
 
 		public override string ToString() {
@@ -308,11 +299,8 @@ namespace Dicom {
 
 		#region Public Methods
 		public bool Match(DicomDataset dataset) {
-			if (dataset.Contains(_tag)) {
-				var value = dataset.Get<string>(_tag, -1, String.Empty);
-				return value.Wildcard(_pattern);
-			}
-			return false;
+			var value = dataset.Get<string>(_tag, -1, String.Empty);
+			return value.Wildcard(_pattern);
 		}
 
 		public override string ToString() {
@@ -335,17 +323,14 @@ namespace Dicom {
 		public RegexDicomMatchRule(DicomTag tag, string pattern) {
 			_tag = tag;
 			_pattern = pattern;
-			_regex = new Regex(_pattern);
+			_regex = new Regex(_pattern, RegexOptions.Compiled);
 		}
 		#endregion
 
 		#region Public Methods
 		public bool Match(DicomDataset dataset) {
-			if (dataset.Contains(_tag)) {
-				var value = dataset.Get<string>(_tag, -1, String.Empty);
-				return _regex.IsMatch(value);
-			}
-			return false;
+			var value = dataset.Get<string>(_tag, -1, String.Empty);
+			return _regex.IsMatch(value);
 		}
 
 		public override string ToString() {
@@ -372,12 +357,10 @@ namespace Dicom {
 
 		#region Public Methods
 		public bool Match(DicomDataset dataset) {
-			if (dataset.Contains(_tag)) {
-				var value = dataset.Get<string>(_tag, -1, String.Empty);
-				foreach (string v in _values)
-					if (v == value)
-						return true;
-			}
+			var value = dataset.Get<string>(_tag, -1, String.Empty);
+			foreach (string v in _values)
+				if (v == value)
+					return true;
 			return false;
 		}
 
@@ -391,6 +374,31 @@ namespace Dicom {
 			}
 			sb.Append("']");
 			return sb.ToString();
+		}
+		#endregion
+	}
+
+	/// <summary>
+	/// Rule that always returns true or false.
+	/// </summary>
+	public class BoolDicomMatchRule : IDicomMatchRule {
+		#region Private Members
+		private bool _value;
+		#endregion
+
+		#region Public Constructor
+		public BoolDicomMatchRule(bool value) {
+			_value = value;
+		}
+		#endregion
+
+		#region Public Methods
+		public bool Match(DicomDataset dataset) {
+			return _value;
+		}
+
+		public override string ToString() {
+			return _value.ToString();
 		}
 		#endregion
 	}

@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using Dicom.IO.Buffer;
 
+using Dicom.StructuredReport;
+
 namespace Dicom {
 	public class DicomDataset : IEnumerable<DicomItem> {
 		private IDictionary<DicomTag, DicomItem> _items;
@@ -76,28 +78,88 @@ namespace Dicom {
 				if (typeof(T) == typeof(byte[]))
 					return (T)(object)element.Buffer.Data;
 
-				if (n >= element.Count)
+				if (n >= element.Count || element.Count == 0)
 					return defaultValue;
+
 				return (T)(object)element.Get<T>(n);
+			}
+
+			if (item.GetType() == typeof(DicomSequence)) {
+				if (typeof(T) == typeof(DicomCodeItem))
+					return (T)(object)new DicomCodeItem((DicomSequence)item);
+
+				if (typeof(T) == typeof(DicomMeasuredValue))
+					return (T)(object)new DicomMeasuredValue((DicomSequence)item);
+
+				if (typeof(T) == typeof(DicomReferencedSOP))
+					return (T)(object)new DicomReferencedSOP((DicomSequence)item);
 			}
 
 			throw new DicomDataException("Unable to get a value type of {0} from DICOM item of type {1}", typeof(T), item.GetType());
 		}
 
+		/// <summary>
+		/// Converts a dictionary tag to a valid private tag. Creates the private creator tag if needed.
+		/// </summary>
+		/// <param name="tag">Dictionary DICOM tag</param>
+		/// <returns>Private DICOM tag</returns>
+		public DicomTag GetPrivateTag(DicomTag tag) {
+			// not a private tag
+			if (!tag.IsPrivate)
+				return tag;
+
+			// group length
+			if (tag.Element == 0x0000)
+				return tag;
+
+			// private creator?
+			if (tag.PrivateCreator == null)
+				return tag;
+
+			// already a valid private tag
+			if (tag.Element >= 0xff)
+				return tag;
+
+			ushort group = 0x0010;
+			for (; ; group++) {
+				var creator = new DicomTag(tag.Group, group);
+				if (!Contains(creator)) {
+					Add(new DicomLongString(creator, tag.PrivateCreator.Creator));
+					break;
+				}
+
+				var value = Get<string>(creator, String.Empty);
+				if (tag.PrivateCreator.Creator == value)
+					return new DicomTag(tag.Group, (ushort)((group << 8) + (tag.Element & 0xff)), tag.PrivateCreator);
+			}
+
+			return new DicomTag(tag.Group, (ushort)((group << 8) + (tag.Element & 0xff)), tag.PrivateCreator);
+		}
+
 		public DicomDataset Add(params DicomItem[] items) {
 			if (items != null) {
-				foreach (DicomItem item in items)
-					if (item != null)
-						_items[item.Tag] = item;
+				foreach (DicomItem item in items) {
+					if (item != null) {
+						if (item.Tag.IsPrivate)
+							_items[GetPrivateTag(item.Tag)] = item;
+						else
+							_items[item.Tag] = item;
+					}
+				}
 			}
 			return this;
 		}
 
 		public DicomDataset Add(IEnumerable<DicomItem> items) {
 			if (items != null) {
-				foreach (DicomItem item in items)
-					if (item != null)
-						_items[item.Tag] = item;
+				foreach (DicomItem item in items) {
+					if (item != null) {
+						if (item.Tag.IsPrivate)
+							_items[GetPrivateTag(item.Tag)] = item;
+						else
+							_items[item.Tag] = item;
+					}
+				}
 			}
 			return this;
 		}
@@ -251,6 +313,15 @@ namespace Dicom {
 					return Add(new DicomSignedLong(tag, EmptyBuffer.Value));
 				if (typeof(T) == typeof(int))
 					return Add(new DicomSignedLong(tag, values.Cast<int>().ToArray()));
+			}
+
+			if (vr == DicomVR.SQ) {
+				if (values == null)
+					return Add(new DicomSequence(tag));
+				if (typeof(T) == typeof(DicomContentItem))
+					return Add(new DicomSequence(tag, values.Cast<DicomContentItem>().Select(x => x.Dataset).ToArray()));
+				if (typeof(T) == typeof(DicomDataset) || typeof(T) == typeof(DicomCodeItem) || typeof(T) == typeof(DicomMeasuredValue) || typeof(T) == typeof(DicomReferencedSOP))
+					return Add(new DicomSequence(tag, values.Cast<DicomDataset>().ToArray()));
 			}
 
 			if (vr == DicomVR.SS) {
